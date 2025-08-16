@@ -1,0 +1,18 @@
+
+{
+  "name": "coop-backend",
+  "version": "1.0.0",
+  "description": "API para la aplicación de Balance Social Cooperativo",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.6.5"
+  }
+}
