@@ -41,14 +41,14 @@ exports.register = async (req, res) => {
 };
 
 exports.login = async (req, res) => {
-    const { username, password } = req.body;
+    const { name, password } = req.body;
 
-    if (!username || !password) {
+    if (!name || !password) {
         return res.status(400).json({ message: 'Usuario y contraseña son requeridos.' });
     }
 
     try {
-        const [rows] = await pool.query('SELECT * FROM users WHERE name = ?', [username]);
+        const [rows] = await pool.query('SELECT * FROM users WHERE name = ?', [name]);
         if (rows.length === 0) {
             return res.status(401).json({ message: 'Credenciales inválidas.' });
         }
