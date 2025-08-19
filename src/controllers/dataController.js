@@ -19,46 +19,54 @@ const groupChildrenBy = (children, key) => {
 // A robust function to format a date string into a MySQL DATETIME compatible format.
 // This new version is more tolerant of different input formats to prevent parsing errors.
 const toMySQLDateTime = (dateString, keepTime = false) => {
-    if (!dateString) return null;
-    
-    // Standard ISO 8601 parsing is the priority
-    let date = new Date(dateString);
+    if (!dateString || typeof dateString !== 'string') return null;
 
-    // If standard parsing fails, try common variations
-    if (isNaN(date.getTime())) {
-        const str = String(dateString);
-        // Try replacing space with 'T' (for "YYYY-MM-DD HH:MM:SS")
-        date = new Date(str.replace(' ', 'T'));
-        
-        // If still invalid, try parsing as DD/MM/YYYY or DD-MM-YYYY
-        if (isNaN(date.getTime())) {
-            const dmyMatch = str.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
-            if (dmyMatch) {
-                const day = parseInt(dmyMatch[1], 10);
-                const month = parseInt(dmyMatch[2], 10) - 1; // Month is 0-indexed in JS Date
-                const year = parseInt(dmyMatch[3], 10);
-                // To avoid timezone issues, we construct a UTC date
-                date = new Date(Date.UTC(year, month, day));
-            }
+    // Priority 1: Handle ISO 8601 format (YYYY-MM-DDTHH:mm:ss.sssZ) directly.
+    // This is the most common format sent from the frontend.
+    const isoRegex = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/;
+    const match = dateString.match(isoRegex);
+
+    if (match) {
+        if (keepTime) {
+            return `${match[1]} ${match[2]}`; // Returns "YYYY-MM-DD HH:mm:ss"
+        } else {
+            return `${match[1]} 00:00:00`; // Returns "YYYY-MM-DD 00:00:00"
         }
     }
-    
-    if (isNaN(date.getTime())) {
-        console.warn(`Could not parse date: "${dateString}". Returning null.`);
+
+    // Priority 2: Fallback to Date object parsing for other formats (e.g., "YYYY-MM-DD" from date pickers, or existing DB values).
+    try {
+        let date = new Date(dateString);
+
+        // Check if the date is valid.
+        if (isNaN(date.getTime())) {
+            // If standard parsing fails, it might be a format JS doesn't like directly.
+            // Let's try to normalize it by replacing space with 'T'.
+            const normalized = String(dateString).replace(' ', 'T');
+            const fallbackDate = new Date(normalized);
+            if (isNaN(fallbackDate.getTime())) {
+                console.warn(`Could not parse date: "${dateString}". Returning null.`);
+                return null;
+            }
+            // Use the valid fallback date
+            date = fallbackDate;
+        }
+
+        const year = date.getUTCFullYear();
+        const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(date.getUTCDate()).padStart(2, '0');
+
+        if (keepTime) {
+            const hours = String(date.getUTCHours()).padStart(2, '0');
+            const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+            const seconds = String(date.getUTCSeconds()).padStart(2, '0');
+            return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+        } else {
+            return `${year}-${month}-${day} 00:00:00`;
+        }
+    } catch (e) {
+        console.error(`Error processing date string: "${dateString}"`, e);
         return null;
-    }
-
-    const year = date.getUTCFullYear();
-    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(date.getUTCDate()).padStart(2, '0');
-
-    if (keepTime) {
-        const hours = String(date.getUTCHours()).padStart(2, '0');
-        const minutes = String(date.getUTCMinutes()).padStart(2, '0');
-        const seconds = String(date.getUTCSeconds()).padStart(2, '0');
-        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-    } else {
-        return `${year}-${month}-${day} 00:00:00`;
     }
 };
 
