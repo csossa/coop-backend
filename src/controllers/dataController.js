@@ -17,38 +17,52 @@ const groupChildrenBy = (children, key) => {
 };
 
 // A robust function to format a date string into a MySQL DATETIME compatible format.
+// This function uses UTC methods to be immune to server timezone configurations.
 // keepTime = true -> YYYY-MM-DD HH:MM:SS
 // keepTime = false -> YYYY-MM-DD 00:00:00
 const toMySQLDateTime = (dateString, keepTime = false) => {
     if (!dateString) return null;
     
-    let date;
-    // `new Date(isoString)` works reliably.
-    // For `dd/mm/yyyy`, we need to parse manually to avoid ambiguity.
-    const dmyMatch = String(dateString).match(/^(\d{2})[./-](\d{2})[./-](\d{4})/);
-    
-    if (dmyMatch) {
-        // It's dd/mm/yyyy. new Date(yyyy, mm-1, dd) creates a date in the server's local timezone.
-        date = new Date(dmyMatch[3], dmyMatch[2] - 1, dmyMatch[1]);
-    } else {
-        // Assume ISO 8601 or another format that `new Date` can parse.
-        date = new Date(dateString);
-    }
-    
+    // `new Date()` is the standard way to parse ISO 8601 strings, which the frontend provides.
+    // This will correctly handle strings like "2024-08-19T14:30:00.000Z".
+    const date = new Date(dateString);
+
+    // If `dateString` is not a format `new Date` can parse, it returns an "Invalid Date" object.
+    // `getTime()` on an invalid date returns NaN. This is the primary check for validity.
     if (isNaN(date.getTime())) {
         console.warn(`Invalid date format encountered, could not parse: ${dateString}`);
+        
+        // As a fallback, try to parse formats like "dd/mm/yyyy" or "dd-mm-yyyy".
+        // This is important because `new Date('25/08/2024')` is ambiguous and often fails.
+        const dmyMatch = String(dateString).match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
+        if (dmyMatch) {
+            const day = parseInt(dmyMatch[1], 10);
+            const month = parseInt(dmyMatch[2], 10);
+            const year = parseInt(dmyMatch[3], 10);
+            // Construct a new ISO-like string to re-parse, ensuring it's treated as local time
+            // and avoiding timezone shifts from just using new Date(y, m-1, d).
+            const isoLikeString = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T00:00:00`;
+            const fallbackDate = new Date(isoLikeString);
+            if (!isNaN(fallbackDate.getTime())) {
+                 // Format it directly since we know it's a date without time.
+                 return `${fallbackDate.getFullYear()}-${String(fallbackDate.getMonth() + 1).padStart(2, '0')}-${String(fallbackDate.getDate()).padStart(2, '0')} 00:00:00`;
+            }
+        }
+        
+        // If all attempts to parse fail, we must return null.
         return null;
     }
 
-    // Format to YYYY-MM-DD HH:MM:SS, respecting the keepTime flag.
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
+    // If the date was parsed successfully, format it to MySQL's DATETIME format.
+    // Using getUTC* methods avoids any issues with the server's local timezone.
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
 
     if (keepTime) {
-        const hours = String(date.getHours()).padStart(2, '0');
-        const minutes = String(date.getMinutes()).padStart(2, '0');
-        const seconds = String(date.getSeconds()).padStart(2, '0');
+        const hours = String(date.getUTCHours()).padStart(2, '0');
+        const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+        const seconds = String(date.getUTCSeconds()).padStart(2, '0');
         return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
     } else {
         return `${year}-${month}-${day} 00:00:00`;
