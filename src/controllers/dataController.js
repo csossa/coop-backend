@@ -16,42 +16,42 @@ const groupChildrenBy = (children, key) => {
     }, {});
 };
 
-// Formats a date string into a MySQL DATETIME compatible format ('YYYY-MM-DD HH:MM:SS').
-const toMySQLDateTime = (dateString) => {
+// A robust function to format a date string into a MySQL DATETIME compatible format.
+// keepTime = true -> YYYY-MM-DD HH:MM:SS
+// keepTime = false -> YYYY-MM-DD 00:00:00
+const toMySQLDateTime = (dateString, keepTime = false) => {
     if (!dateString) return null;
-    try {
-        // new Date() can handle ISO strings (e.g., "2024-07-25T14:45:10.123Z") and many other formats.
-        // It's the most reliable starting point.
-        const date = new Date(dateString);
-
-        // If new Date() fails, it returns an invalid date (time is NaN).
-        if (isNaN(date.getTime())) {
-            // As a fallback for non-standard formats like "dd/mm/yyyy", we can try to parse manually.
-            const parts = String(dateString).match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
-            if (parts) {
-                // parts[1]=day, parts[2]=month, parts[3]=year
-                const day = parseInt(parts[1], 10);
-                const month = parseInt(parts[2], 10) - 1; // JS months are 0-indexed
-                const year = parseInt(parts[3], 10);
-                const manualDate = new Date(Date.UTC(year, month, day));
-                if (!isNaN(manualDate.getTime())) {
-                    // The manual parse worked. Format and return. Time will be 00:00:00 UTC.
-                    return manualDate.toISOString().slice(0, 19).replace('T', ' ');
-                }
-            }
-            // If both standard and manual parsing fail, the date is invalid.
-            console.warn(`Invalid or unparseable date format encountered: ${dateString}`);
-            return null;
-        }
-        
-        // If the date was parsed successfully, format it to 'YYYY-MM-DD HH:MM:SS'.
-        // Using `toISOString` and slicing is a robust way to get the UTC time,
-        // preventing issues with the server's local timezone.
-        return date.toISOString().slice(0, 19).replace('T', ' ');
-
-    } catch (e) {
-        console.error(`Error formatting date: ${dateString}`, e);
+    
+    let date;
+    // `new Date(isoString)` works reliably.
+    // For `dd/mm/yyyy`, we need to parse manually to avoid ambiguity.
+    const dmyMatch = String(dateString).match(/^(\d{2})[./-](\d{2})[./-](\d{4})/);
+    
+    if (dmyMatch) {
+        // It's dd/mm/yyyy. new Date(yyyy, mm-1, dd) creates a date in the server's local timezone.
+        date = new Date(dmyMatch[3], dmyMatch[2] - 1, dmyMatch[1]);
+    } else {
+        // Assume ISO 8601 or another format that `new Date` can parse.
+        date = new Date(dateString);
+    }
+    
+    if (isNaN(date.getTime())) {
+        console.warn(`Invalid date format encountered, could not parse: ${dateString}`);
         return null;
+    }
+
+    // Format to YYYY-MM-DD HH:MM:SS, respecting the keepTime flag.
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+
+    if (keepTime) {
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    } else {
+        return `${year}-${month}-${day} 00:00:00`;
     }
 };
 
@@ -208,25 +208,45 @@ exports.saveAppData = async (req, res) => {
 
                 await connection.query('DELETE FROM observations WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.observations?.length) {
-                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, toMySQLDateTime(o.date), o.text]);
+                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, toMySQLDateTime(o.date, true), o.text]);
                     await connection.query('INSERT INTO observations (indicator_id, id, author, role, date, text) VALUES ?', [values]);
                 }
                 
                 await connection.query('DELETE FROM risks WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.risks?.length) {
-                    const values = indicator.risks.map(r => [indicator.id, r.id, r.title, r.description, r.impact, r.probability, r.riskScore, r.mitigationPlan, r.status, r.owner, toMySQLDateTime(r.createdDate)]);
+                    const values = indicator.risks.map(r => [indicator.id, r.id, r.title, r.description, r.impact, r.probability, r.riskScore, r.mitigationPlan, r.status, r.owner, toMySQLDateTime(r.createdDate, true)]);
                     await connection.query('INSERT INTO risks (indicator_id, id, title, description, impact, probability, riskScore, mitigationPlan, status, owner, createdDate) VALUES ?', [values]);
                 }
                 
-                await connection.query('DELETE FROM attachments WHERE indicator_id = ?', [indicator.id]);
+                // --- CENTRALIZED ATTACHMENT HANDLING ---
+                const allAttachments = [];
                 if (indicator.attachments?.length) {
-                    const values = indicator.attachments.map(f => [indicator.id, f.id, f.fileName, f.fileType, f.fileSize, f.dataUrl, f.uploadedBy, toMySQLDateTime(f.uploadDate)]);
-                    await connection.query('INSERT INTO attachments (indicator_id, id, fileName, fileType, fileSize, dataUrl, uploadedBy, uploadDate) VALUES ?', [values]);
+                    allAttachments.push(...indicator.attachments);
                 }
+                if (indicator.actionPlans?.length) {
+                    indicator.actionPlans.forEach(plan => {
+                        plan.updates?.forEach(update => {
+                            if (update.attachment) {
+                                allAttachments.push(update.attachment);
+                            }
+                        });
+                    });
+                }
+                const uniqueAttachments = Object.values(allAttachments.reduce((acc, cur) => {
+                    if (cur && cur.id) acc[cur.id] = cur;
+                    return acc;
+                }, {}));
+
+                await connection.query('DELETE FROM attachments WHERE indicator_id = ?', [indicator.id]);
+                if (uniqueAttachments.length > 0) {
+                    const attachmentValues = uniqueAttachments.map(f => [indicator.id, f.id, f.fileName, f.fileType, f.fileSize, f.dataUrl, f.uploadedBy, toMySQLDateTime(f.uploadDate, true)]);
+                    await connection.query('INSERT INTO attachments (indicator_id, id, fileName, fileType, fileSize, dataUrl, uploadedBy, uploadDate) VALUES ?', [attachmentValues]);
+                }
+                // --- END ATTACHMENT HANDLING ---
 
                 await connection.query('DELETE FROM audit_logs WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.auditLog?.length) {
-                    const values = indicator.auditLog.map(l => [indicator.id, l.id, toMySQLDateTime(l.id), l.user, l.action, l.details]);
+                    const values = indicator.auditLog.map(l => [indicator.id, l.id, toMySQLDateTime(l.id, true), l.user, l.action, l.details]);
                     await connection.query('INSERT INTO audit_logs (indicator_id, id, timestamp, user, action, details) VALUES ?', [values]);
                 }
 
@@ -235,9 +255,9 @@ exports.saveAppData = async (req, res) => {
                 if (indicator.actionPlans?.length) {
                     for (const plan of indicator.actionPlans) {
                         await connection.query('INSERT INTO action_plans (id, indicator_id, title, description, owner, status, dueDate, createdDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                            [plan.id, indicator.id, plan.title, plan.description, plan.owner, plan.status, toMySQLDateTime(plan.dueDate), toMySQLDateTime(plan.createdDate)]);
+                            [plan.id, indicator.id, plan.title, plan.description, plan.owner, plan.status, toMySQLDateTime(plan.dueDate, false), toMySQLDateTime(plan.createdDate, true)]);
                         if (plan.updates?.length) {
-                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.date), u.author, u.text, u.statusChange, u.attachment?.id || null]);
+                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.date, true), u.author, u.text, u.statusChange, u.attachment?.id || null]);
                             await connection.query('INSERT INTO action_plan_updates (id, action_plan_id, date, author, text, statusChange, attachmentId) VALUES ?', [updateValues]);
                         }
                     }
@@ -246,30 +266,31 @@ exports.saveAppData = async (req, res) => {
         }
 
         // --- SYNCHRONIZE TOP-LEVEL COLLECTIONS ---
-        const syncTopLevel = async (tableName, collection, columns, dateColumns = []) => {
+        const syncTopLevel = async (tableName, collection, columns, dateConfig = {}) => {
              await connection.query(`DELETE FROM ${tableName}`);
              if (collection?.length) {
                  const values = collection.map(item =>
                      columns.map(col => {
                          const val = item[col];
-                         return dateColumns.includes(col) ? toMySQLDateTime(val) : val;
+                         const keepTime = dateConfig[col] === true;
+                         return dateConfig.hasOwnProperty(col) ? toMySQLDateTime(val, keepTime) : val;
                      })
                  );
                  await connection.query(`INSERT INTO ${tableName} (${columns.join(',')}) VALUES ?`, [values]);
              }
         };
         
-        if (data.strategicGoals) await syncTopLevel('strategic_goals', data.strategicGoals, ['id', 'title', 'description', 'targetDate'], ['targetDate']);
-        if (data.notifications) await syncTopLevel('notifications', data.notifications, ['id', 'userId', 'type', 'message', 'relatedIndicatorId', 'relatedMeetingId', 'relatedThreadId', 'isRead', 'timestamp'], ['timestamp']);
+        if (data.strategicGoals) await syncTopLevel('strategic_goals', data.strategicGoals, ['id', 'title', 'description', 'targetDate'], { targetDate: false });
+        if (data.notifications) await syncTopLevel('notifications', data.notifications, ['id', 'userId', 'type', 'message', 'relatedIndicatorId', 'relatedMeetingId', 'relatedThreadId', 'isRead', 'timestamp'], { timestamp: true });
         
         if (data.meetings) {
             await connection.query('DELETE FROM decisions');
             await connection.query('DELETE FROM meetings');
             for (const meeting of data.meetings) {
                 await connection.query('INSERT INTO meetings (id, date, attendees, agenda, minutes) VALUES (?, ?, ?, ?, ?)', 
-                    [meeting.id, toMySQLDateTime(meeting.date), meeting.attendees, meeting.agenda, meeting.minutes]);
+                    [meeting.id, toMySQLDateTime(meeting.date, true), meeting.attendees, meeting.agenda, meeting.minutes]);
                 if (meeting.decisions?.length) {
-                    const decisionValues = meeting.decisions.map(d => [d.id, meeting.id, d.text, d.responsibleUserId, toMySQLDateTime(d.dueDate), d.status]);
+                    const decisionValues = meeting.decisions.map(d => [d.id, meeting.id, d.text, d.responsibleUserId, toMySQLDateTime(d.dueDate, false), d.status]);
                     await connection.query('INSERT INTO decisions (id, meeting_id, text, responsibleUserId, dueDate, status) VALUES ?', [decisionValues]);
                 }
             }
@@ -280,9 +301,9 @@ exports.saveAppData = async (req, res) => {
             await connection.query('DELETE FROM discussion_threads');
             for (const thread of data.discussionThreads) {
                 await connection.query('INSERT INTO discussion_threads (id, title, content, authorId, timestamp, principleTag) VALUES (?, ?, ?, ?, ?, ?)',
-                    [thread.id, thread.title, thread.content, thread.authorId, toMySQLDateTime(thread.timestamp), thread.principleTag]);
+                    [thread.id, thread.title, thread.content, thread.authorId, toMySQLDateTime(thread.timestamp, true), thread.principleTag]);
                 if (thread.replies?.length) {
-                    const replyValues = thread.replies.map(r => [r.id, thread.id, r.authorId, toMySQLDateTime(r.timestamp), r.content]);
+                    const replyValues = thread.replies.map(r => [r.id, thread.id, r.authorId, toMySQLDateTime(r.timestamp, true), r.content]);
                     await connection.query('INSERT INTO thread_replies (id, thread_id, authorId, timestamp, content) VALUES ?', [replyValues]);
                 }
             }
