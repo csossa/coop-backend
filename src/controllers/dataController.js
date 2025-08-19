@@ -17,26 +17,33 @@ const groupChildrenBy = (children, key) => {
 };
 
 // Formats a date string into a MySQL DATETIME compatible format.
-// Now robustly handles 'dd/mm/yyyy' format from the frontend.
+// Now robustly handles various 'd/m/y' formats from the frontend.
 const toMySQLDateTime = (dateString) => {
     if (!dateString) return null;
     let date;
 
-    // Handle dd/mm/yyyy format from frontend's toLocaleDateString
-    if (typeof dateString === 'string' && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateString)) {
-        const parts = dateString.split('/');
-        // new Date(year, monthIndex, day) - month is 0-indexed
-        date = new Date(parts[2], parseInt(parts[1], 10) - 1, parts[0]);
+    if (typeof dateString !== 'string') {
+        date = new Date(dateString); // Handle if it's already a Date object
     } else {
-        // Handle ISO strings and other formats that new Date() can parse
-        date = new Date(dateString);
+        // Attempt to parse d/m/y formats with different separators (/, ., -)
+        const dmyMatch = dateString.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
+        if (dmyMatch) {
+            // new Date(year, monthIndex, day) - month is 0-indexed.
+            // Using Date.UTC prevents timezone offsets from shifting the date by a day.
+            date = new Date(Date.UTC(parseInt(dmyMatch[3], 10), parseInt(dmyMatch[2], 10) - 1, parseInt(dmyMatch[1], 10)));
+        } else {
+            // Fallback for ISO strings (e.g., "2024-07-25T19:08:15.123Z") and other standard formats.
+            date = new Date(dateString);
+        }
     }
     
+    // Check if the parsed date is valid
     if (isNaN(date.getTime())) {
-        console.warn(`Could not parse date: ${dateString}. Returning null.`);
+        console.warn(`Could not parse date: "${dateString}". Returning null.`);
         return null;
     }
-    // Return in YYYY-MM-DD HH:MM:SS format
+    
+    // Return in 'YYYY-MM-DD HH:MM:SS' format for MySQL
     return date.toISOString().slice(0, 19).replace('T', ' ');
 };
 
