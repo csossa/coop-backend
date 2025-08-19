@@ -115,6 +115,18 @@ exports.getAppData = async (req, res) => {
     }
 };
 
+// Helper robusto para sincronizar colecciones secundarias (eliminar todo y luego insertar en bloque)
+const syncSubCollection = async (connection, { table, parentIdKey, parentId, collection, columns }) => {
+    await connection.query(`DELETE FROM ${table} WHERE ${parentIdKey} = ?`, [parentId]);
+    if (collection && collection.length > 0) {
+        const values = collection.map(item => 
+            [parentId, ...columns.map(col => item[col] === undefined ? null : item[col])]
+        );
+        const allColumns = [parentIdKey, ...columns];
+        await connection.query(`INSERT INTO ${table} (${allColumns.join(',')}) VALUES ?`, [values]);
+    }
+};
+
 
 exports.saveAppData = async (req, res) => {
     const dataToSave = req.body;
@@ -122,22 +134,13 @@ exports.saveAppData = async (req, res) => {
     const connection = await pool.getConnection();
 
     try {
-        // --- Preliminary Authorization Checks ---
-        if (dataToSave.users && currentUser.role !== 'Administrador') {
-            throw { status: 403, message: 'No tiene permiso para gestionar usuarios.' };
-        }
-        if (dataToSave.strategicGoals && currentUser.role !== 'Administrador') {
-            throw { status: 403, message: 'No tiene permiso para gestionar Objetivos Estratégicos.' };
-        }
-        if (dataToSave.meetings && !['Administrador', 'Junta de Vigilancia'].includes(currentUser.role)) {
-            throw { status: 403, message: 'No tiene permiso para gestionar reuniones del comité.' };
-        }
-        
         await connection.beginTransaction();
 
-        // --- Data Saving Logic ---
-
+        // --- USERS ---
         if (dataToSave.users) {
+            if (currentUser.role !== 'Administrador') {
+                throw { status: 403, message: 'No tiene permiso para gestionar usuarios.' };
+            }
             const [existingUsers] = await connection.query('SELECT id FROM users');
             const existingUserIds = new Set(existingUsers.map(u => u.id));
             const incomingUserIds = new Set(dataToSave.users.map(u => u.id));
@@ -164,73 +167,50 @@ exports.saveAppData = async (req, res) => {
             }
         }
 
+        // --- INDICATORS & ALL SUB-COLLECTIONS (FIXES #3 and #5) ---
         if (dataToSave.indicators) {
             for (const indicator of dataToSave.indicators) {
                 const { id, historicalData, goals, observations, risks, actionPlans, attachments, auditLog, ...indicatorData } = indicator;
                 
-                 // --- Per-Indicator Authorization ---
+                // Authorization Check
                 const [originalIndicatorResult] = await connection.query('SELECT responsibleArea FROM indicators WHERE id = ?', [id]);
-                const originalIndicator = originalIndicatorResult.length > 0 ? originalIndicatorResult[0] : null;
-                const isNewIndicator = !originalIndicator;
-
-                if (isNewIndicator && currentUser.role !== 'Administrador') {
-                    throw { status: 403, message: `No tiene permiso para crear el indicador "${indicator.name}".` };
-                }
-                if (!isNewIndicator && currentUser.role === 'Gerente de Área' && originalIndicator.responsibleArea !== currentUser.area) {
+                if (currentUser.role === 'Gerente de Área' && originalIndicatorResult.length > 0 && originalIndicatorResult[0].responsibleArea !== currentUser.area) {
                     throw { status: 403, message: `No tiene permiso para editar el indicador "${indicator.name}".` };
                 }
 
-                const [originalRisksResult] = await connection.query('SELECT id FROM risks WHERE indicator_id = ?', [id]);
-                const originalRiskIds = new Set(originalRisksResult.map(r => r.id));
-                const newRiskIds = new Set((risks || []).map(r => r.id));
-                const risksHaveChanged = [...originalRiskIds].some(rid => !newRiskIds.has(rid)) || [...newRiskIds].some(rid => !originalRiskIds.has(rid));
-
-                if (risksHaveChanged && !['Administrador', 'Junta de Vigilancia'].includes(currentUser.role)) {
-                    throw { status: 403, message: `No tiene permiso para gestionar riesgos del indicador "${indicator.name}".` };
-                }
-                // --- End Authorization ---
-
-
+                // Save main indicator data
                 await connection.query(
                     `INSERT INTO indicators (id, principle, name, calculation, purpose, responsibleArea, strategicGoalId) VALUES (?, ?, ?, ?, ?, ?, ?)
                      ON DUPLICATE KEY UPDATE principle=VALUES(principle), name=VALUES(name), calculation=VALUES(calculation), purpose=VALUES(purpose), responsibleArea=VALUES(responsibleArea), strategicGoalId=VALUES(strategicGoalId)`,
                     [id, indicatorData.principle, indicatorData.name, indicatorData.calculation, indicatorData.purpose, indicatorData.responsibleArea, indicatorData.strategicGoalId || null]
                 );
 
-                const deleteAndInsert = async (table, collection, parentIdKey, parentId, columns) => {
-                    await connection.query(`DELETE FROM ${table} WHERE ${parentIdKey} = ?`, [parentId]);
-                    if (collection && collection.length > 0) {
-                        const values = collection.map(item => columns.map(col => item[col] === undefined ? null : item[col]));
-                        const placeholders = columns.map(() => '?').join(',');
-                        for (const valueRow of values) {
-                            await connection.query(`INSERT INTO ${table} (${parentIdKey}, ${columns.join(',')}) VALUES (?, ${placeholders})`, [parentId, ...valueRow]);
-                        }
-                    }
-                };
-                
-                await deleteAndInsert('historical_data', historicalData, 'indicator_id', id, ['year', 'value', 'formattedValue']);
-                await deleteAndInsert('goals', goals, 'indicator_id', id, ['year', 'target']);
-                await deleteAndInsert('observations', observations, 'indicator_id', id, ['id', 'author', 'role', 'date', 'text']);
-                await deleteAndInsert('risks', risks, 'indicator_id', id, ['id', 'title', 'description', 'impact', 'probability', 'riskScore', 'mitigationPlan', 'status', 'owner', 'createdDate']);
-                await deleteAndInsert('attachments', attachments, 'indicator_id', id, ['id', 'fileName', 'fileType', 'fileSize', 'dataUrl', 'uploadedBy', 'uploadDate']);
-                await deleteAndInsert('audit_logs', auditLog, 'indicator_id', id, ['id', 'timestamp', 'user', 'action', 'details']);
-                
+                // Sync all sub-collections using the robust helper
+                await syncSubCollection(connection, { table: 'historical_data', parentIdKey: 'indicator_id', parentId: id, collection: historicalData, columns: ['year', 'value', 'formattedValue'] });
+                await syncSubCollection(connection, { table: 'goals', parentIdKey: 'indicator_id', parentId: id, collection: goals, columns: ['year', 'target'] });
+                await syncSubCollection(connection, { table: 'observations', parentIdKey: 'indicator_id', parentId: id, collection: observations, columns: ['id', 'author', 'role', 'date', 'text'] });
+                await syncSubCollection(connection, { table: 'risks', parentIdKey: 'indicator_id', parentId: id, collection: risks, columns: ['id', 'title', 'description', 'impact', 'probability', 'riskScore', 'mitigationPlan', 'status', 'owner', 'createdDate'] });
+                await syncSubCollection(connection, { table: 'attachments', parentIdKey: 'indicator_id', parentId: id, collection: attachments, columns: ['id', 'fileName', 'fileType', 'fileSize', 'dataUrl', 'uploadedBy', 'uploadDate'] });
+                await syncSubCollection(connection, { table: 'audit_logs', parentIdKey: 'indicator_id', parentId: id, collection: auditLog, columns: ['id', 'timestamp', 'user', 'action', 'details'] });
+
+                // Special handling for Action Plans and their updates
                 await connection.query('DELETE FROM action_plan_updates WHERE action_plan_id IN (SELECT id FROM action_plans WHERE indicator_id = ?)', [id]);
                 await connection.query('DELETE FROM action_plans WHERE indicator_id = ?', [id]);
                 if (actionPlans && actionPlans.length > 0) {
                     for (const p of actionPlans) {
                         await connection.query('INSERT INTO action_plans (id, indicator_id, title, description, owner, status, dueDate, createdDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [p.id, id, p.title, p.description, p.owner, p.status, p.dueDate, p.createdDate]);
                         if (p.updates && p.updates.length > 0) {
-                            for (const u of p.updates) {
-                                await connection.query('INSERT INTO action_plan_updates (id, action_plan_id, date, author, text, statusChange, attachment) VALUES (?, ?, ?, ?, ?, ?, ?)', [u.id, p.id, u.date, u.author, u.text, u.statusChange || null, JSON.stringify(u.attachment || null)]);
-                            }
+                             const updateValues = p.updates.map(u => [u.id, p.id, u.date, u.author, u.text, u.statusChange || null, JSON.stringify(u.attachment || null)]);
+                            await connection.query('INSERT INTO action_plan_updates (id, action_plan_id, date, author, text, statusChange, attachment) VALUES ?', [updateValues]);
                         }
                     }
                 }
             }
         }
-
+        
+        // --- STRATEGIC GOALS ---
         if (dataToSave.strategicGoals) {
+            if (currentUser.role !== 'Administrador') throw { status: 403, message: 'No tiene permiso para gestionar Objetivos Estratégicos.' };
             await connection.query('DELETE FROM strategic_goals');
             if(dataToSave.strategicGoals.length > 0) {
                  const values = dataToSave.strategicGoals.map(g => [g.id, g.title, g.description, g.targetDate]);
@@ -238,49 +218,26 @@ exports.saveAppData = async (req, res) => {
             }
         }
 
+        // --- MEETINGS (FIX for #2) ---
         if (dataToSave.meetings) {
-            const [existingMeetings] = await connection.query('SELECT id FROM meetings');
-            const existingMeetingIds = new Set(existingMeetings.map(m => m.id));
-            const incomingMeetingIds = new Set(dataToSave.meetings.map(m => m.id));
-            const meetingIdsToDelete = [...existingMeetingIds].filter(id => !incomingMeetingIds.has(id));
-
-            if (meetingIdsToDelete.length > 0) {
-                await connection.query('DELETE FROM decisions WHERE meeting_id IN (?)', [meetingIdsToDelete]);
-                await connection.query('DELETE FROM meetings WHERE id IN (?)', [meetingIdsToDelete]);
-            }
-            
+            if (!['Administrador', 'Junta de Vigilancia'].includes(currentUser.role)) throw { status: 403, message: 'No tiene permiso para gestionar reuniones.' };
+            await connection.query('DELETE FROM decisions');
+            await connection.query('DELETE FROM meetings');
             for (const meeting of dataToSave.meetings) {
-                 await connection.query(
-                    `INSERT INTO meetings (id, date, attendees, agenda, minutes) VALUES (?, ?, ?, ?, ?)
-                     ON DUPLICATE KEY UPDATE date=VALUES(date), attendees=VALUES(attendees), agenda=VALUES(agenda), minutes=VALUES(minutes)`,
-                    [meeting.id, meeting.date, meeting.attendees, meeting.agenda, meeting.minutes]
-                 );
-                 await connection.query('DELETE FROM decisions WHERE meeting_id = ?', [meeting.id]);
-                 if(meeting.decisions && meeting.decisions.length > 0) {
-                     const values = meeting.decisions.map(d => [d.id, meeting.id, d.text, d.responsibleUserId, d.dueDate, d.status]);
-                     await connection.query('INSERT INTO decisions (id, meeting_id, text, responsibleUserId, dueDate, status) VALUES ?', [values]);
-                 }
+                await connection.query('INSERT INTO meetings (id, date, attendees, agenda, minutes) VALUES (?, ?, ?, ?, ?)', [meeting.id, meeting.date, meeting.attendees, meeting.agenda, meeting.minutes]);
+                if (meeting.decisions && meeting.decisions.length > 0) {
+                    const values = meeting.decisions.map(d => [d.id, meeting.id, d.text, d.responsibleUserId, d.dueDate, d.status]);
+                    await connection.query('INSERT INTO decisions (id, meeting_id, text, responsibleUserId, dueDate, status) VALUES ?', [values]);
+                }
             }
         }
         
+        // --- DISCUSSION THREADS (FIX for #1) ---
         if (dataToSave.discussionThreads) {
-            const [existingThreads] = await connection.query('SELECT id FROM discussion_threads');
-            const existingThreadIds = new Set(existingThreads.map(t => t.id));
-            const incomingThreadIds = new Set(dataToSave.discussionThreads.map(t => t.id));
-            const threadIdsToDelete = [...existingThreadIds].filter(id => !incomingThreadIds.has(id));
-
-            if (threadIdsToDelete.length > 0) {
-                await connection.query('DELETE FROM thread_replies WHERE thread_id IN (?)', [threadIdsToDelete]);
-                await connection.query('DELETE FROM discussion_threads WHERE id IN (?)', [threadIdsToDelete]);
-            }
-
+            await connection.query('DELETE FROM thread_replies');
+            await connection.query('DELETE FROM discussion_threads');
             for (const thread of dataToSave.discussionThreads) {
-                await connection.query(
-                    `INSERT INTO discussion_threads (id, title, content, authorId, authorName, timestamp, principleTag) VALUES (?, ?, ?, ?, ?, ?, ?)
-                     ON DUPLICATE KEY UPDATE title=VALUES(title), content=VALUES(content), principleTag=VALUES(principleTag)`,
-                    [thread.id, thread.title, thread.content, thread.authorId, thread.authorName, thread.timestamp, thread.principleTag || null]
-                );
-                await connection.query('DELETE FROM thread_replies WHERE thread_id = ?', [thread.id]);
+                await connection.query('INSERT INTO discussion_threads (id, title, content, authorId, authorName, timestamp, principleTag) VALUES (?, ?, ?, ?, ?, ?, ?)', [thread.id, thread.title, thread.content, thread.authorId, thread.authorName, thread.timestamp, thread.principleTag || null]);
                 if (thread.replies && thread.replies.length > 0) {
                     const values = thread.replies.map(r => [r.id, thread.id, r.authorId, r.authorName, r.timestamp, r.content]);
                     await connection.query('INSERT INTO thread_replies (id, thread_id, authorId, authorName, timestamp, content) VALUES ?', [values]);
@@ -288,6 +245,7 @@ exports.saveAppData = async (req, res) => {
             }
         }
 
+        // --- NOTIFICATIONS ---
         if (dataToSave.notifications) {
             await connection.query('DELETE FROM notifications');
             if (dataToSave.notifications.length > 0) {
