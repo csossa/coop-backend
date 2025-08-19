@@ -195,11 +195,31 @@ exports.saveAppData = async (req, res) => {
                     await connection.query('INSERT INTO risks (indicator_id, id, title, description, impact, probability, riskScore, mitigationPlan, status, owner, createdDate) VALUES ?', [values]);
                 }
                 
-                await connection.query('DELETE FROM attachments WHERE indicator_id = ?', [indicator.id]);
+                // --- CENTRALIZED ATTACHMENT HANDLING ---
+                const allAttachments = [];
                 if (indicator.attachments?.length) {
-                    const values = indicator.attachments.map(f => [indicator.id, f.id, f.fileName, f.fileType, f.fileSize, f.dataUrl, f.uploadedBy, toMySQLDateTime(f.uploadDate)]);
-                    await connection.query('INSERT INTO attachments (indicator_id, id, fileName, fileType, fileSize, dataUrl, uploadedBy, uploadDate) VALUES ?', [values]);
+                    allAttachments.push(...indicator.attachments);
                 }
+                if (indicator.actionPlans?.length) {
+                    indicator.actionPlans.forEach(plan => {
+                        plan.updates?.forEach(update => {
+                            if (update.attachment) {
+                                allAttachments.push(update.attachment);
+                            }
+                        });
+                    });
+                }
+                const uniqueAttachments = Object.values(allAttachments.reduce((acc, cur) => {
+                    if (cur && cur.id) acc[cur.id] = cur;
+                    return acc;
+                }, {}));
+
+                await connection.query('DELETE FROM attachments WHERE indicator_id = ?', [indicator.id]);
+                if (uniqueAttachments.length > 0) {
+                    const attachmentValues = uniqueAttachments.map(f => [indicator.id, f.id, f.fileName, f.fileType, f.fileSize, f.dataUrl, f.uploadedBy, toMySQLDateTime(f.uploadDate)]);
+                    await connection.query('INSERT INTO attachments (indicator_id, id, fileName, fileType, fileSize, dataUrl, uploadedBy, uploadDate) VALUES ?', [attachmentValues]);
+                }
+                // --- END ATTACHMENT HANDLING ---
 
                 await connection.query('DELETE FROM audit_logs WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.auditLog?.length) {
