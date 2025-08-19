@@ -214,8 +214,8 @@ exports.saveAppData = async (req, res) => {
                         await connection.query('INSERT INTO action_plans (id, indicator_id, title, description, owner, status, dueDate, createdDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                             [plan.id, indicator.id, plan.title, plan.description, plan.owner, plan.status, toMySQLDateTime(plan.dueDate), toMySQLDateTime(plan.createdDate)]);
                         if (plan.updates?.length) {
-                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.id), u.author, u.text, u.statusChange, JSON.stringify(u.attachment || null)]);
-                            await connection.query('INSERT INTO action_plan_updates (id, action_plan_id, date, author, text, statusChange, attachment) VALUES ?', [updateValues]);
+                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.id), u.author, u.text, u.statusChange, u.attachment?.id || null]);
+                            await connection.query('INSERT INTO action_plan_updates (id, action_plan_id, date, author, text, statusChange, attachmentId) VALUES ?', [updateValues]);
                         }
                     }
                 }
