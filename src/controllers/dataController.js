@@ -16,20 +16,28 @@ const groupChildrenBy = (children, key) => {
     }, {});
 };
 
-// Formats a date string (ideally ISO) into a MySQL DATETIME compatible format.
+// Formats a date string into a MySQL DATETIME compatible format.
+// Now robustly handles 'dd/mm/yyyy' format from the frontend.
 const toMySQLDateTime = (dateString) => {
     if (!dateString) return null;
-    try {
-        const date = new Date(dateString);
-        if (isNaN(date.getTime())) {
-            console.warn(`Invalid date format encountered: ${dateString}`);
-            return null;
-        }
-        return date.toISOString().slice(0, 19).replace('T', ' ');
-    } catch (e) {
-        console.error(`Error formatting date: ${dateString}`, e);
+    let date;
+
+    // Handle dd/mm/yyyy format from frontend's toLocaleDateString
+    if (typeof dateString === 'string' && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateString)) {
+        const parts = dateString.split('/');
+        // new Date(year, monthIndex, day) - month is 0-indexed
+        date = new Date(parts[2], parseInt(parts[1], 10) - 1, parts[0]);
+    } else {
+        // Handle ISO strings and other formats that new Date() can parse
+        date = new Date(dateString);
+    }
+    
+    if (isNaN(date.getTime())) {
+        console.warn(`Could not parse date: ${dateString}. Returning null.`);
         return null;
     }
+    // Return in YYYY-MM-DD HH:MM:SS format
+    return date.toISOString().slice(0, 19).replace('T', ' ');
 };
 
 
@@ -185,7 +193,7 @@ exports.saveAppData = async (req, res) => {
 
                 await connection.query('DELETE FROM observations WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.observations?.length) {
-                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, o.date, o.text]);
+                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, toMySQLDateTime(o.date)?.split(' ')[0], o.text]);
                     await connection.query('INSERT INTO observations (indicator_id, id, author, role, date, text) VALUES ?', [values]);
                 }
                 
@@ -234,7 +242,7 @@ exports.saveAppData = async (req, res) => {
                         await connection.query('INSERT INTO action_plans (id, indicator_id, title, description, owner, status, dueDate, createdDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                             [plan.id, indicator.id, plan.title, plan.description, plan.owner, plan.status, toMySQLDateTime(plan.dueDate), toMySQLDateTime(plan.createdDate)]);
                         if (plan.updates?.length) {
-                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.id), u.author, u.text, u.statusChange, u.attachment?.id || null]);
+                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.date), u.author, u.text, u.statusChange, u.attachment?.id || null]);
                             await connection.query('INSERT INTO action_plan_updates (id, action_plan_id, date, author, text, statusChange, attachmentId) VALUES ?', [updateValues]);
                         }
                     }
