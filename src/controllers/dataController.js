@@ -16,35 +16,20 @@ const groupChildrenBy = (children, key) => {
     }, {});
 };
 
-// Formats a date string into a MySQL DATETIME compatible format.
-// Now robustly handles various 'd/m/y' formats from the frontend.
+// Formats a date string (ideally ISO) into a MySQL DATETIME compatible format.
 const toMySQLDateTime = (dateString) => {
     if (!dateString) return null;
-    let date;
-
-    if (typeof dateString !== 'string') {
-        date = new Date(dateString); // Handle if it's already a Date object
-    } else {
-        // Attempt to parse d/m/y formats with different separators (/, ., -)
-        const dmyMatch = dateString.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
-        if (dmyMatch) {
-            // new Date(year, monthIndex, day) - month is 0-indexed.
-            // Using Date.UTC prevents timezone offsets from shifting the date by a day.
-            date = new Date(Date.UTC(parseInt(dmyMatch[3], 10), parseInt(dmyMatch[2], 10) - 1, parseInt(dmyMatch[1], 10)));
-        } else {
-            // Fallback for ISO strings (e.g., "2024-07-25T19:08:15.123Z") and other standard formats.
-            date = new Date(dateString);
+    try {
+        const date = new Date(dateString);
+        if (isNaN(date.getTime())) {
+            console.warn(`Invalid date format encountered: ${dateString}`);
+            return null;
         }
-    }
-    
-    // Check if the parsed date is valid
-    if (isNaN(date.getTime())) {
-        console.warn(`Could not parse date: "${dateString}". Returning null.`);
+        return date.toISOString().slice(0, 19).replace('T', ' ');
+    } catch (e) {
+        console.error(`Error formatting date: ${dateString}`, e);
         return null;
     }
-    
-    // Return in 'YYYY-MM-DD HH:MM:SS' format for MySQL
-    return date.toISOString().slice(0, 19).replace('T', ' ');
 };
 
 
@@ -200,7 +185,7 @@ exports.saveAppData = async (req, res) => {
 
                 await connection.query('DELETE FROM observations WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.observations?.length) {
-                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, toMySQLDateTime(o.date)?.split(' ')[0], o.text]);
+                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, o.date, o.text]);
                     await connection.query('INSERT INTO observations (indicator_id, id, author, role, date, text) VALUES ?', [values]);
                 }
                 
@@ -210,31 +195,11 @@ exports.saveAppData = async (req, res) => {
                     await connection.query('INSERT INTO risks (indicator_id, id, title, description, impact, probability, riskScore, mitigationPlan, status, owner, createdDate) VALUES ?', [values]);
                 }
                 
-                // --- CENTRALIZED ATTACHMENT HANDLING ---
-                const allAttachments = [];
-                if (indicator.attachments?.length) {
-                    allAttachments.push(...indicator.attachments);
-                }
-                if (indicator.actionPlans?.length) {
-                    indicator.actionPlans.forEach(plan => {
-                        plan.updates?.forEach(update => {
-                            if (update.attachment) {
-                                allAttachments.push(update.attachment);
-                            }
-                        });
-                    });
-                }
-                const uniqueAttachments = Object.values(allAttachments.reduce((acc, cur) => {
-                    if (cur && cur.id) acc[cur.id] = cur;
-                    return acc;
-                }, {}));
-
                 await connection.query('DELETE FROM attachments WHERE indicator_id = ?', [indicator.id]);
-                if (uniqueAttachments.length > 0) {
-                    const attachmentValues = uniqueAttachments.map(f => [indicator.id, f.id, f.fileName, f.fileType, f.fileSize, f.dataUrl, f.uploadedBy, toMySQLDateTime(f.uploadDate)]);
-                    await connection.query('INSERT INTO attachments (indicator_id, id, fileName, fileType, fileSize, dataUrl, uploadedBy, uploadDate) VALUES ?', [attachmentValues]);
+                if (indicator.attachments?.length) {
+                    const values = indicator.attachments.map(f => [indicator.id, f.id, f.fileName, f.fileType, f.fileSize, f.dataUrl, f.uploadedBy, toMySQLDateTime(f.uploadDate)]);
+                    await connection.query('INSERT INTO attachments (indicator_id, id, fileName, fileType, fileSize, dataUrl, uploadedBy, uploadDate) VALUES ?', [values]);
                 }
-                // --- END ATTACHMENT HANDLING ---
 
                 await connection.query('DELETE FROM audit_logs WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.auditLog?.length) {
@@ -249,7 +214,7 @@ exports.saveAppData = async (req, res) => {
                         await connection.query('INSERT INTO action_plans (id, indicator_id, title, description, owner, status, dueDate, createdDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                             [plan.id, indicator.id, plan.title, plan.description, plan.owner, plan.status, toMySQLDateTime(plan.dueDate), toMySQLDateTime(plan.createdDate)]);
                         if (plan.updates?.length) {
-                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.date), u.author, u.text, u.statusChange, u.attachment?.id || null]);
+                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.id), u.author, u.text, u.statusChange, u.attachment?.id || null]);
                             await connection.query('INSERT INTO action_plan_updates (id, action_plan_id, date, author, text, statusChange, attachmentId) VALUES ?', [updateValues]);
                         }
                     }
