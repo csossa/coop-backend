@@ -16,35 +16,38 @@ const groupChildrenBy = (children, key) => {
     }, {});
 };
 
-// Formats a date string (ideally ISO) into a MySQL DATETIME compatible format.
+// Formats a date string into a MySQL DATETIME compatible format ('YYYY-MM-DD HH:MM:SS').
 const toMySQLDateTime = (dateString) => {
     if (!dateString) return null;
     try {
-        let date;
-        // Check for formats like dd/mm/yyyy, dd-mm-yyyy, dd.mm.yyyy
-        const parts = String(dateString).match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
-        if (parts) {
-            // parts = [full_match, day, month, year]
-            const day = parseInt(parts[1], 10);
-            const month = parseInt(parts[2], 10) - 1; // JS months are 0-indexed
-            const year = parseInt(parts[3], 10);
-            date = new Date(year, month, day);
-        } else {
-            // Fallback for ISO format and others that new Date() can handle
-            date = new Date(dateString);
-        }
+        // new Date() can handle ISO strings (e.g., "2024-07-25T14:45:10.123Z") and many other formats.
+        // It's the most reliable starting point.
+        const date = new Date(dateString);
 
+        // If new Date() fails, it returns an invalid date (time is NaN).
         if (isNaN(date.getTime())) {
+            // As a fallback for non-standard formats like "dd/mm/yyyy", we can try to parse manually.
+            const parts = String(dateString).match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
+            if (parts) {
+                // parts[1]=day, parts[2]=month, parts[3]=year
+                const day = parseInt(parts[1], 10);
+                const month = parseInt(parts[2], 10) - 1; // JS months are 0-indexed
+                const year = parseInt(parts[3], 10);
+                const manualDate = new Date(Date.UTC(year, month, day));
+                if (!isNaN(manualDate.getTime())) {
+                    // The manual parse worked. Format and return. Time will be 00:00:00 UTC.
+                    return manualDate.toISOString().slice(0, 19).replace('T', ' ');
+                }
+            }
+            // If both standard and manual parsing fail, the date is invalid.
             console.warn(`Invalid or unparseable date format encountered: ${dateString}`);
             return null;
         }
         
-        // Format to 'YYYY-MM-DD HH:MM:SS' to avoid timezone issues.
-        const year = date.getFullYear();
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const day = String(date.getDate()).padStart(2, '0');
-        // We only care about the date part for observations and plan updates, so time can be zeroed.
-        return `${year}-${month}-${day} 00:00:00`;
+        // If the date was parsed successfully, format it to 'YYYY-MM-DD HH:MM:SS'.
+        // Using `toISOString` and slicing is a robust way to get the UTC time,
+        // preventing issues with the server's local timezone.
+        return date.toISOString().slice(0, 19).replace('T', ' ');
 
     } catch (e) {
         console.error(`Error formatting date: ${dateString}`, e);
