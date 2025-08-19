@@ -167,7 +167,7 @@ exports.saveAppData = async (req, res) => {
             }
         }
 
-        // --- INDICATORS & ALL SUB-COLLECTIONS (FIXES #3 and #5) ---
+        // --- INDICATORS & ALL SUB-COLLECTIONS ---
         if (dataToSave.indicators) {
             for (const indicator of dataToSave.indicators) {
                 const { id, historicalData, goals, observations, risks, actionPlans, attachments, auditLog, ...indicatorData } = indicator;
@@ -185,11 +185,18 @@ exports.saveAppData = async (req, res) => {
                     [id, indicatorData.principle, indicatorData.name, indicatorData.calculation, indicatorData.purpose, indicatorData.responsibleArea, indicatorData.strategicGoalId || null]
                 );
 
-                // Sync all sub-collections using the robust helper
+                // Sync all sub-collections
                 await syncSubCollection(connection, { table: 'historical_data', parentIdKey: 'indicator_id', parentId: id, collection: historicalData, columns: ['year', 'value', 'formattedValue'] });
                 await syncSubCollection(connection, { table: 'goals', parentIdKey: 'indicator_id', parentId: id, collection: goals, columns: ['year', 'target'] });
-                await syncSubCollection(connection, { table: 'observations', parentIdKey: 'indicator_id', parentId: id, collection: observations, columns: ['id', 'author', 'role', 'date', 'text'] });
-                await syncSubCollection(connection, { table: 'risks', parentIdKey: 'indicator_id', parentId: id, collection: risks, columns: ['id', 'title', 'description', 'impact', 'probability', 'riskScore', 'mitigationPlan', 'status', 'owner', 'createdDate'] });
+                
+                // FIX: Map frontend `id` (ISO string) to DB `timestamp` column for observations
+                const observationsForDb = (observations || []).map(o => ({ ...o, timestamp: o.id }));
+                await syncSubCollection(connection, { table: 'observations', parentIdKey: 'indicator_id', parentId: id, collection: observationsForDb, columns: ['id', 'author', 'role', 'date', 'text', 'timestamp'] });
+
+                // FIX: Map frontend `createdDate` to DB `timestamp` column for risks
+                const risksForDb = (risks || []).map(r => ({ ...r, timestamp: r.createdDate }));
+                await syncSubCollection(connection, { table: 'risks', parentIdKey: 'indicator_id', parentId: id, collection: risksForDb, columns: ['id', 'title', 'description', 'impact', 'probability', 'riskScore', 'mitigationPlan', 'status', 'owner', 'timestamp'] });
+                
                 await syncSubCollection(connection, { table: 'attachments', parentIdKey: 'indicator_id', parentId: id, collection: attachments, columns: ['id', 'fileName', 'fileType', 'fileSize', 'dataUrl', 'uploadedBy', 'uploadDate'] });
                 await syncSubCollection(connection, { table: 'audit_logs', parentIdKey: 'indicator_id', parentId: id, collection: auditLog, columns: ['id', 'timestamp', 'user', 'action', 'details'] });
 
@@ -218,7 +225,7 @@ exports.saveAppData = async (req, res) => {
             }
         }
 
-        // --- MEETINGS (FIX for #2) ---
+        // --- MEETINGS ---
         if (dataToSave.meetings) {
             if (!['Administrador', 'Junta de Vigilancia'].includes(currentUser.role)) throw { status: 403, message: 'No tiene permiso para gestionar reuniones.' };
             await connection.query('DELETE FROM decisions');
@@ -232,15 +239,17 @@ exports.saveAppData = async (req, res) => {
             }
         }
         
-        // --- DISCUSSION THREADS (FIX for #1) ---
+        // --- DISCUSSION THREADS ---
         if (dataToSave.discussionThreads) {
             await connection.query('DELETE FROM thread_replies');
             await connection.query('DELETE FROM discussion_threads');
             for (const thread of dataToSave.discussionThreads) {
-                await connection.query('INSERT INTO discussion_threads (id, title, content, authorId, authorName, timestamp, principleTag) VALUES (?, ?, ?, ?, ?, ?, ?)', [thread.id, thread.title, thread.content, thread.authorId, thread.authorName, thread.timestamp, thread.principleTag || null]);
+                // FIX: Removed authorName from INSERT to match schema
+                await connection.query('INSERT INTO discussion_threads (id, title, content, authorId, timestamp, principleTag) VALUES (?, ?, ?, ?, ?, ?)', [thread.id, thread.title, thread.content, thread.authorId, thread.timestamp, thread.principleTag || null]);
                 if (thread.replies && thread.replies.length > 0) {
-                    const values = thread.replies.map(r => [r.id, thread.id, r.authorId, r.authorName, r.timestamp, r.content]);
-                    await connection.query('INSERT INTO thread_replies (id, thread_id, authorId, authorName, timestamp, content) VALUES ?', [values]);
+                    // FIX: Removed authorName from INSERT to match schema
+                    const values = thread.replies.map(r => [r.id, thread.id, r.authorId, r.timestamp, r.content]);
+                    await connection.query('INSERT INTO thread_replies (id, thread_id, authorId, timestamp, content) VALUES ?', [values]);
                 }
             }
         }
