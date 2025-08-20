@@ -185,8 +185,8 @@ exports.saveAppData = async (req, res) => {
 
                 await connection.query('DELETE FROM observations WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.observations?.length) {
-                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, o.date, o.text]);
-                    await connection.query('INSERT INTO observations (indicator_id, id, author, role, date, text) VALUES ?', [values]);
+                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, o.date, o.text, toMySQLDateTime(o.id)]);
+                    await connection.query('INSERT INTO observations (indicator_id, id, author, role, date, text, timestamp) VALUES ?', [values]);
                 }
                 
                 await connection.query('DELETE FROM risks WHERE indicator_id = ?', [indicator.id]);
