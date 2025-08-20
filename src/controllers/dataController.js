@@ -185,8 +185,8 @@ exports.saveAppData = async (req, res) => {
 
                 await connection.query('DELETE FROM observations WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.observations?.length) {
-                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, o.date, o.text, toMySQLDateTime(o.id)]);
-                    await connection.query('INSERT INTO observations (indicator_id, id, author, role, date, text, timestamp) VALUES ?', [values]);
+                    const values = indicator.observations.map(o => [indicator.id, o.id, o.author, o.role, toMySQLDateTime(o.date), o.text]);
+                    await connection.query('INSERT INTO observations (indicator_id, id, author, role, date, text) VALUES ?', [values]);
                 }
                 
                 await connection.query('DELETE FROM risks WHERE indicator_id = ?', [indicator.id]);
@@ -195,11 +195,29 @@ exports.saveAppData = async (req, res) => {
                     await connection.query('INSERT INTO risks (indicator_id, id, title, description, impact, probability, riskScore, mitigationPlan, status, owner, createdDate) VALUES ?', [values]);
                 }
                 
+                // Consolidate all attachments from indicator and its action plan updates
+                const allAttachments = [...(indicator.attachments || [])];
+                const attachmentIds = new Set((indicator.attachments || []).map(a => a.id));
+
+                if (indicator.actionPlans) {
+                    for (const plan of indicator.actionPlans) {
+                        if (plan.updates) {
+                            for (const update of plan.updates) {
+                                if (update.attachment && !attachmentIds.has(update.attachment.id)) {
+                                    allAttachments.push(update.attachment);
+                                    attachmentIds.add(update.attachment.id);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 await connection.query('DELETE FROM attachments WHERE indicator_id = ?', [indicator.id]);
-                if (indicator.attachments?.length) {
-                    const values = indicator.attachments.map(f => [indicator.id, f.id, f.fileName, f.fileType, f.fileSize, f.dataUrl, f.uploadedBy, toMySQLDateTime(f.uploadDate)]);
+                if (allAttachments.length > 0) {
+                    const values = allAttachments.map(f => [indicator.id, f.id, f.fileName, f.fileType, f.fileSize, f.dataUrl, f.uploadedBy, toMySQLDateTime(f.uploadDate)]);
                     await connection.query('INSERT INTO attachments (indicator_id, id, fileName, fileType, fileSize, dataUrl, uploadedBy, uploadDate) VALUES ?', [values]);
                 }
+
 
                 await connection.query('DELETE FROM audit_logs WHERE indicator_id = ?', [indicator.id]);
                 if (indicator.auditLog?.length) {
@@ -214,7 +232,7 @@ exports.saveAppData = async (req, res) => {
                         await connection.query('INSERT INTO action_plans (id, indicator_id, title, description, owner, status, dueDate, createdDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                             [plan.id, indicator.id, plan.title, plan.description, plan.owner, plan.status, toMySQLDateTime(plan.dueDate), toMySQLDateTime(plan.createdDate)]);
                         if (plan.updates?.length) {
-                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.id), u.author, u.text, u.statusChange, u.attachment?.id || null]);
+                            const updateValues = plan.updates.map(u => [u.id, plan.id, toMySQLDateTime(u.date), u.author, u.text, u.statusChange, u.attachment?.id || null]);
                             await connection.query('INSERT INTO action_plan_updates (id, action_plan_id, date, author, text, statusChange, attachmentId) VALUES ?', [updateValues]);
                         }
                     }
